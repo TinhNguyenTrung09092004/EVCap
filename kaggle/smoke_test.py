@@ -4,7 +4,14 @@
     python kaggle/smoke_test.py --full     # + build EVCap and do a forward/backward
 """
 import argparse
+import os
 import sys
+
+# `python kaggle/smoke_test.py` puts kaggle/ on sys.path, not the repo root.
+# Defaults like ext_data/ and prompts/ are cwd-relative too, so run from the root.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
 
 
 def versions():

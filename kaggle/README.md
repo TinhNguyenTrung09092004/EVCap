@@ -5,6 +5,7 @@
 
 ```
 !git clone -b kaggle https://github.com/TinhNguyenTrung09092004/EVCap.git /kaggle/working/EVCap
+%cd /kaggle/working/EVCap
 ```
 
 ## 2. Các bước
