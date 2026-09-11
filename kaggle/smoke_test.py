@@ -62,14 +62,32 @@ def full(args):
         "image": torch.randn(2, 3, 224, 224, device=device),
         "text_input": ["a man riding a horse on a beach", "two dogs playing in the snow"],
     }
-    scaler = torch.amp.GradScaler("cuda")
+    trainable = [p for p in model.parameters() if p.requires_grad]
     with torch.amp.autocast("cuda", enabled=True):
         out = model(samples)
-    print(f"\nloss = {out['loss'].item():.4f}  (finite: {torch.isfinite(out['loss']).item()})")
-    scaler.scale(out["loss"]).backward()
+    loss = out["loss"]
+    print(f"\nloss = {loss.item():.4f}  (finite: {torch.isfinite(loss).item()})")
+    assert torch.isfinite(loss), "non-finite loss"
+
+    model.zero_grad(set_to_none=True)
+    loss.backward(retain_graph=True)
     grads = [(n, p.grad.abs().mean().item()) for n, p in model.named_parameters()
              if p.requires_grad and p.grad is not None]
-    print("grad means:", {n: round(g, 8) for n, g in grads})
+    print("unscaled grad means:", {n: f"{g:.3e}" for n, g in grads})
+    bad = [n for n, g in grads if g != g or g == float("inf")]
+    assert not bad, f"non-finite unscaled grads: {bad}"
+
+    opt = torch.optim.AdamW(trainable, lr=1e-4)
+    scaler = torch.amp.GradScaler("cuda")
+    model.zero_grad(set_to_none=True)
+    scaler.scale(loss).backward()
+    scale0 = scaler.get_scale()
+    scaler.step(opt)
+    scaler.update()
+    skipped = scaler.get_scale() < scale0
+    print(f"GradScaler first step: init_scale {scale0:g} -> {scaler.get_scale():g} "
+          f"({'overflowed, step skipped (normal warm-up)' if skipped else 'applied'})")
+    model.zero_grad(set_to_none=True)
     print(f"peak VRAM {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
 
     model.eval()
