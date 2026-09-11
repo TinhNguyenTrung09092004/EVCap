@@ -1,13 +1,11 @@
 import logging
 import torch
-from torch.cuda.amp import autocast as autocast
 import torch.nn as nn
+import torch.nn.functional as F
 import random
 from models.blip2 import Blip2Base, disabled_train
-from models.modeling_llama import LlamaForCausalLM
-from transformers import LlamaTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import pickle
-import faiss
 import re
 
 class EVCap(Blip2Base):
@@ -33,11 +31,14 @@ class EVCap(Blip2Base):
         end_sym='\n',
         low_resource=False,
         device_8bit=0,
+        lm_dtype=torch.float32,
+        retrieval_backend='torch',
     ):
         super().__init__()
 
         self.low_resource = low_resource
         self.topn = topn
+        self.retrieval_backend = retrieval_backend
         print('topn:', self.topn)
 
         ##### Image 
@@ -99,27 +100,21 @@ class EVCap(Blip2Base):
         print('Loading Q-Former_txt Done')
 
 
-        ##### Caption generation 
-        print('Loading LLAMA')
-        self.llama_tokenizer = LlamaTokenizer.from_pretrained(llama_model, use_fast=False)
-        self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+        ##### Caption generation
+        print('Loading LM:', llama_model)
+        self.llama_tokenizer = AutoTokenizer.from_pretrained(llama_model)
+        if self.llama_tokenizer.pad_token is None:
+            self.llama_tokenizer.pad_token = self.llama_tokenizer.eos_token
+        if self.llama_tokenizer.bos_token_id is None:
+            self.llama_tokenizer.bos_token = self.llama_tokenizer.eos_token
 
-        if self.low_resource:
-            self.llama_model = LlamaForCausalLM.from_pretrained(
-                llama_model,
-                torch_dtype=torch.float16,
-                load_in_8bit=True,
-                device_map={'': device_8bit}
-            )
-        else:
-            self.llama_model = LlamaForCausalLM.from_pretrained(
-                llama_model,
-                torch_dtype=torch.float16,
-            )
+        self.llama_model = AutoModelForCausalLM.from_pretrained(llama_model)
+        self.llama_model = self.llama_model.to(lm_dtype)
 
         for name, param in self.llama_model.named_parameters():
             param.requires_grad = False
-        print('Loading LLAMA Done')
+        print('Loading LM Done | hidden_size =', self.llama_model.config.hidden_size,
+              '| dtype =', next(self.llama_model.parameters()).dtype)
 
         ###
         self.llama_proj = nn.Linear(
@@ -141,13 +136,27 @@ class EVCap(Blip2Base):
         print(ext_path)
         with open(ext_path, 'rb') as f:
             ext_base_img, self.ext_base_img_id = pickle.load(f)
-            print(ext_base_img.shape, len(self.ext_base_img_id))
+        print(ext_base_img.shape, len(self.ext_base_img_id))
+
+        if self.retrieval_backend == 'torch':
+            # Exactly equivalent to faiss IndexFlatIP over L2-normalised vectors,
+            # but runs on the GPU instead of fighting the dataloader for CPU cores.
+            ext_norm = F.normalize(ext_base_img.float(), dim=-1)
+            self.register_buffer('ext_feats', ext_norm, persistent=False)
+            self.feat_index = None
+        else:
+            import faiss
             feature_library_cpu = ext_base_img.cpu().numpy()
             faiss.normalize_L2(feature_library_cpu)
             self.feat_index = faiss.IndexFlatIP(feature_library_cpu.shape[1])
             self.feat_index.add(feature_library_cpu)
-            print(f"loaded external base image")
+        print(f"loaded external base image | backend = {self.retrieval_backend}")
 
+
+    def embed_tokens(self, token_ids):
+        """Decoder-agnostic word embedding lookup (GPT-2 `transformer.wte`,
+        LLaMA `model.embed_tokens`, ...)."""
+        return self.llama_model.get_input_embeddings()(token_ids)
 
     def vit_to_cpu(self):
         self.ln_vision.to("cpu")
@@ -168,14 +177,14 @@ class EVCap(Blip2Base):
                     p_before, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)
                 p_after_tokens = self.llama_tokenizer(
                     p_after, return_tensors="pt", add_special_tokens=False).to(img_embeds.device)        
-                p_before_embeds = self.llama_model.model.embed_tokens(p_before_tokens.input_ids)
-                p_after_embeds = self.llama_model.model.embed_tokens(p_after_tokens.input_ids)
+                p_before_embeds = self.embed_tokens(p_before_tokens.input_ids)
+                p_after_embeds = self.embed_tokens(p_after_tokens.input_ids)
                 img_embeds_i = img_embeds[i].unsqueeze(0)
                 wrapped_embed_i = torch.cat([p_before_embeds, img_embeds_i, p_after_embeds], dim=1)
                 emb_lists.append(wrapped_embed_i)  
 
             emb_lens = [emb.shape[1] for emb in emb_lists]
-            pad_emb = self.llama_model.model.embed_tokens(torch.tensor(self.llama_tokenizer.pad_token_id, device=img_embeds.device))
+            pad_emb = self.embed_tokens(torch.tensor(self.llama_tokenizer.pad_token_id, device=img_embeds.device))
             wrapped_embs = pad_emb.expand(len(emb_lens), max(emb_lens), -1).clone()
             wrapped_atts = torch.zeros([len(emb_lens), max(emb_lens)], dtype=torch.int, device=img_embeds.device)
             for i, emb in enumerate(emb_lists):
@@ -203,17 +212,23 @@ class EVCap(Blip2Base):
 
     def retrieve_similar_features(self, query_features, feat_index, image_id, top_k = 5, sub_top_k = 32):
         batch_size, nums, dims = query_features.shape
-        query_features = query_features.view(-1,dims)   
+        query_features = query_features.reshape(-1, dims)
 
-        query_features_cpu = query_features.detach().cpu().numpy()
-        faiss.normalize_L2(query_features_cpu)
-        top_k_similarities, top_k_indices = feat_index.search(query_features_cpu, top_k)
+        if self.retrieval_backend == 'torch':
+            q = F.normalize(query_features.detach().float(), dim=-1)
+            sims = q @ self.ext_feats.to(q.device, q.dtype).t()
+            top_k_similarities, top_k_indices = sims.topk(top_k, dim=-1)
+        else:
+            import faiss
+            query_features_cpu = query_features.detach().cpu().float().numpy()
+            faiss.normalize_L2(query_features_cpu)
+            top_k_similarities, top_k_indices = feat_index.search(query_features_cpu, top_k)
+            top_k_indices = torch.tensor(top_k_indices).to(device = query_features.device)
+            top_k_similarities = torch.tensor(top_k_similarities).to(device = query_features.device)
 
-        top_k_indices = torch.tensor(top_k_indices).to(device = query_features.device)
-        top_k_similarities = torch.tensor(top_k_similarities).to(device = query_features.device)
-        top_k_similarities = top_k_similarities.view(batch_size, -1)
+        top_k_similarities = top_k_similarities.reshape(batch_size, -1)
 
-        indices = top_k_indices.view(batch_size, -1)
+        indices = top_k_indices.reshape(batch_size, -1)
 
         re_txt_list_all = []    
         for batch_i in range(batch_size):
@@ -319,7 +334,7 @@ class EVCap(Blip2Base):
         bos = torch.ones([qform_all_proj.shape[0], 1],
                          dtype=text_tokens.input_ids.dtype,
                          device=text_tokens.input_ids.device) * self.llama_tokenizer.bos_token_id
-        bos_embeds = self.llama_model.model.embed_tokens(bos)
+        bos_embeds = self.embed_tokens(bos)
         atts_bos = atts_qform_all_proj[:, :1]
 
 
@@ -331,7 +346,7 @@ class EVCap(Blip2Base):
                        dtype=torch.long).to(image.device).fill_(-100)  
         )
         targets = torch.cat([empty_targets, targets], dim=1)
-        text_embeds = self.llama_model.model.embed_tokens(text_tokens.input_ids)
+        text_embeds = self.embed_tokens(text_tokens.input_ids)
         
         inputs_embeds = torch.cat([bos_embeds, prompt_embeds, text_embeds], dim=1)
         attention_mask = torch.cat([atts_bos, atts_prompt, text_tokens.attention_mask], dim=1)

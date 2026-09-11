@@ -20,5 +20,5 @@ python -u eval_evcap.py \
 |& tee -a  ${NOCAPS_LOG_FILE}
 
 echo "==========================COCO EVAL================================"
-python evaluation/cocoeval.py --result_file_path $NOCAPS_OUT_PATH/coco*.json |& tee -a  ${COCO_LOG_FILE}
+python kaggle/cocoeval.py --result_file_path $NOCAPS_OUT_PATH/coco*.json |& tee -a  ${NOCAPS_LOG_FILE}
 

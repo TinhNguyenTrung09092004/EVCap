@@ -2,8 +2,13 @@ import torch
 import numpy as np
 from PIL import Image
 import torch.nn.functional as F
-from typing import Optional, Tuple, List
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from typing import Any, Optional, Tuple, List
+
+# Used only as type hints below. The concrete classes were imported here in the
+# original repo; transformers v5 dropped the slow-tokenizer classes, and these
+# helpers are decoder-agnostic anyway.
+GPT2Tokenizer = Any
+GPT2LMHeadModel = Any
 
 
 
@@ -84,7 +89,7 @@ def opt_search(
     
     outputs = model.generate(
         input_ids=input_ids,
-        query_embeds=query_embeds.type(model.dtype),
+        query_embeds=query_embeds.type(_lm_dtype(model)),
         attention_mask=attention_mask,
         do_sample=use_nucleus_sampling,
         top_p=top_p,
@@ -152,14 +157,14 @@ def greedy_search(
     for step in range(max_len):
         # generating initial states of language model
         if step == 0:
-            outputs = model(inputs_embeds = generating.type(model.dtype), past_key_values = past_key_values, use_cache = True)
+            outputs = model(inputs_embeds = generating.type(_lm_dtype(model)), past_key_values = past_key_values, use_cache = True)
             next_token_logits = outputs.logits[:, -1, :]   # (b, n_seq, vocal_size) -> (b, vocal_size), logits of the last token
             past_key_values = outputs.past_key_values      # Tuple[Tuple[(b, h, n_seq, lm_hidden_size/h)]], layers -> (key, value) -> torch.tensor
 
         next_token = torch.argmax(next_token_logits, dim = -1, keepdim = True) # (b, 1)
         next_embedding = word_embed(model, next_token)                     # (b, 1, lm_hidden_size)
         # next_embedding = model.transformer.wte(next_token)                     # (b, 1, lm_hidden_size)
-        outputs = model(inputs_embeds = next_embedding.type(model.dtype), past_key_values = past_key_values, use_cache = True)
+        outputs = model(inputs_embeds = next_embedding.type(_lm_dtype(model)), past_key_values = past_key_values, use_cache = True)
         next_token_logits = outputs.logits[:, -1, :]           # (b, 1, vocal_size) -> (b, vocal_size)
         past_key_values = outputs.past_key_values              # Tuple[Tuple[(b, h, n_seq + 1, lm_hidden_size/h)]]
 
@@ -255,7 +260,7 @@ def beam_search(
 
 
     for i in range(max_len):
-        outputs = model(inputs_embeds=generated.type(model.dtype))
+        outputs = model(inputs_embeds=generated.type(_lm_dtype(model)))
         logits = outputs.logits
         logits = logits[:, -1, :] / (temperature if temperature > 0 else 1.0)
         logits = logits.softmax(-1).log()
@@ -302,12 +307,12 @@ def beam_search(
 
     return output_texts
 
+def _lm_dtype(model):
+    return next(model.parameters()).dtype
+
+
 def word_embed(gpt, caption_tokens):
-    if hasattr(gpt, 'transformer'):
-        embedding_text = gpt.transformer.wte(caption_tokens)
-    elif hasattr(gpt, 'model'):
-        embedding_text = gpt.model.embed_tokens(caption_tokens)
-    return embedding_text
+    return gpt.get_input_embeddings()(caption_tokens)
         
 @torch.no_grad()
 def contrastive_search(

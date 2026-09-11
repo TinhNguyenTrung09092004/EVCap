@@ -9,9 +9,10 @@ import datetime
 import functools
 import os
 
+from urllib.parse import urlparse
+
 import torch
 import torch.distributed as dist
-import timm.models.hub as timm_hub
 
 
 def setup_for_distributed(is_master):
@@ -125,14 +126,16 @@ def download_cached_file(url, check_hash=True, progress=False):
 
     def get_cached_file_path():
         # a hack to sync the file path across processes
-        parts = torch.hub.urlparse(url)
+        parts = urlparse(url)
         filename = os.path.basename(parts.path)
-        cached_file = os.path.join(timm_hub.get_cache_dir(), filename)
-
-        return cached_file
+        cache_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, filename)
 
     if is_main_process():
-        timm_hub.download_cached_file(url, check_hash, progress)
+        cached_file = get_cached_file_path()
+        if not os.path.exists(cached_file):
+            torch.hub.download_url_to_file(url, cached_file, progress=progress)
 
     if is_dist_avail_and_initialized():
         dist.barrier()
