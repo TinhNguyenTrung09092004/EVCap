@@ -1,10 +1,11 @@
-"""Vendored helpers that transformers v5 removed (head pruning + FFN chunking).
+"""Vendored helpers that transformers v5 removed (head pruning, FFN chunking and
+the parts of `ModuleUtilsMixin` that BLIP-2's Q-Former still calls).
 
-Copied verbatim from transformers 4.x `pytorch_utils.py` so that the BLIP-2
-Q-Former code below keeps working unchanged on transformers>=5.
+Copied verbatim from transformers 4.x `pytorch_utils.py` / `modeling_utils.py`
+so that the BLIP-2 Q-Former code below keeps working unchanged on transformers>=5.
 """
 import inspect
-from typing import Callable, List, Set, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -43,6 +44,54 @@ def prune_linear_layer(layer: nn.Linear, index: torch.LongTensor, dim: int = 0) 
         new_layer.bias.copy_(b.contiguous())
         new_layer.bias.requires_grad = True
     return new_layer
+
+
+class ModuleUtilsCompatMixin:
+    @property
+    def dtype(self) -> torch.dtype:
+        for p in self.parameters():
+            return p.dtype
+        for b in self.buffers():
+            return b.dtype
+        return torch.get_default_dtype()
+
+    @property
+    def device(self) -> torch.device:
+        for p in self.parameters():
+            return p.device
+        for b in self.buffers():
+            return b.device
+        return torch.device("cpu")
+
+    def invert_attention_mask(self, encoder_attention_mask: torch.Tensor) -> torch.Tensor:
+        if encoder_attention_mask.dim() == 3:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, :, :]
+        elif encoder_attention_mask.dim() == 2:
+            encoder_extended_attention_mask = encoder_attention_mask[:, None, None, :]
+        else:
+            raise ValueError(f"Wrong shape for encoder_attention_mask: {encoder_attention_mask.shape}")
+        encoder_extended_attention_mask = encoder_extended_attention_mask.to(dtype=self.dtype)
+        encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * torch.finfo(self.dtype).min
+        return encoder_extended_attention_mask
+
+    def get_head_mask(
+        self, head_mask: Optional[torch.Tensor], num_hidden_layers: int, is_attention_chunked: bool = False
+    ):
+        if head_mask is None:
+            return [None] * num_hidden_layers
+        head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
+        if is_attention_chunked is True:
+            head_mask = head_mask.unsqueeze(-1)
+        return head_mask
+
+    def _convert_head_mask_to_5d(self, head_mask: torch.Tensor, num_hidden_layers: int) -> torch.Tensor:
+        if head_mask.dim() == 1:
+            head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+        elif head_mask.dim() == 2:
+            head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+        assert head_mask.dim() == 5, f"head_mask.dim != 5, instead {head_mask.dim()}"
+        return head_mask.to(dtype=self.dtype)
 
 
 def apply_chunking_to_forward(

@@ -36,6 +36,7 @@ from transformers.modeling_outputs import (
 from transformers.modeling_utils import PreTrainedModel
 from models.hf_compat import (
     ModelOutput,
+    ModuleUtilsCompatMixin,
     apply_chunking_to_forward,
     find_pruneable_heads_and_indices,
     prune_linear_layer,
@@ -650,7 +651,7 @@ class BertOnlyMLMHead(nn.Module):
         return prediction_scores
 
 
-class BertPreTrainedModel(PreTrainedModel):
+class BertPreTrainedModel(PreTrainedModel, ModuleUtilsCompatMixin):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
