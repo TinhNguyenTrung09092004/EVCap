@@ -6,14 +6,17 @@
 ```
 !git clone -b kaggle https://github.com/TinhNguyenTrung09092004/EVCap.git /kaggle/working/EVCap
 %cd /kaggle/working/EVCap
+!bash kaggle/setup.sh
+!python kaggle/prepare_data.py
 ```
 
 ## 2. Các bước
 
-```bash
-!bash kaggle/setup.sh
-!python kaggle/prepare_data.py
+smoke
+```
 !python kaggle/smoke_test.py --full
+```
+```bash
 !bash kaggle/run_train.sh
 !bash kaggle/run_eval.sh
 ```
