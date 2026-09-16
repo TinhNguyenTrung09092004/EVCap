@@ -14,8 +14,8 @@
 ### Cell 2
 
 ```bash
-!bash kaggle/run_train.sh
-!bash kaggle/run_eval.sh
+!bash kaggle/run_train.sh --random_seed 0
+!bash kaggle/run_eval.sh  --random_seed 0
 ```
 
 ## 2. Resume
