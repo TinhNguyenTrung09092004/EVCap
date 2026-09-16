@@ -1,0 +1,7 @@
+transformers==5.2.0
+timm==1.0.26
+numpy==2.0.2
+pillow==11.3.0
+omegaconf==2.3.0
+tqdm==4.67.1
+pycocoevalcap @ git+https://github.com/salaniz/pycocoevalcap.git
