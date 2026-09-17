@@ -202,7 +202,7 @@ def beam_search(
     tokens: Optional[torch.Tensor] = None,
     embeddings: Optional[torch.Tensor] = None,
     temperature = 1.0,
-    max_len: int = 45,
+    max_len: int = 46,
     beam_width: int = 5,
     end_of_sentences: List = ["\n", ".", " ."],
     tokenizer: GPT2Tokenizer = None,
